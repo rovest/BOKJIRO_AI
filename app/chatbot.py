@@ -14,7 +14,7 @@ from requests.exceptions import RequestException, Timeout
 from google.api_core.exceptions import GoogleAPIError
 
 class WelfareChatbot:
-    def __init__(self, user_id, llm_choice="exaone", embedding_type="ollama"):
+    def __init__(self, user_id, llm_choice="exaone", embedding_type="google"):
         self.user_id = user_id
         self.db_service = DBService(embedding_type=embedding_type)
         self.llm = get_llm(llm_choice)

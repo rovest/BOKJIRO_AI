@@ -1,15 +1,8 @@
 langchain
 langchain-community
 langchain-google-genai
-langchain-huggingface
 faiss-cpu
-ollama
 python-dotenv
 streamlit
-sentence-transformers
-torch
-transformers
-FlagEmbedding
 thefuzz==0.22.1
 requests
-google-api-core

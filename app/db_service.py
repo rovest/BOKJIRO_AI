@@ -14,27 +14,40 @@ load_dotenv()
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
-from .local_embeddings import get_local_embeddings  # BGE-M3 활성화
-from .ollama_embeddings import get_ollama_embeddings
+# 로컬 임베딩은 Streamlit Cloud 배포 시 제외
+# from .local_embeddings import get_local_embeddings  # BGE-M3 활성화
+# from .ollama_embeddings import get_ollama_embeddings
 
 
-# --- 상수 정의 ---
-try:
-    CURRENT_DIR = Path(__file__).parent
-    BASE_DIR = CURRENT_DIR.parent
-    DB_DIR = BASE_DIR / "db"
-    # BGE-M3 전용 인덱스 경로
-    FAISS_PATH = str(DB_DIR / "faiss_index_bge")
-    if not (DB_DIR / "faiss_index_bge").exists():
-        # 기존 Ollama 인덱스가 있으면 사용
-        if (DB_DIR / "faiss_index").exists():
-            FAISS_PATH = str(DB_DIR / "faiss_index")
-        else:
-            raise FileNotFoundError("FAISS index directory not found at any path.")
-except NameError:
-    BASE_DIR = Path.cwd()
-    DB_DIR = BASE_DIR / "db"
-    FAISS_PATH = str(DB_DIR / "faiss_index_bge")
+# --- 상수 정의 (배포 환경 호환) ---
+def get_faiss_path() -> str:
+    """배포 환경에 맞는 FAISS 경로를 동적으로 결정"""
+    import os
+
+    # 환경변수로 경로 설정 가능
+    if os.getenv('FAISS_PATH'):
+        return os.getenv('FAISS_PATH')
+
+    # 현재 파일 기준 상대 경로
+    current_dir = Path(__file__).parent
+    base_dir = current_dir.parent
+    db_dir = base_dir / "db"
+
+    # 우선순위: Google -> BGE -> Ollama
+    possible_paths = [
+        db_dir / "faiss_index_google_backup",
+        db_dir / "faiss_index_bge",
+        db_dir / "faiss_index"
+    ]
+
+    for path in possible_paths:
+        if path.exists():
+            return str(path)
+
+    # 기본값 (없으면 런타임에 에러 발생)
+    return str(db_dir / "faiss_index_bge")
+
+FAISS_PATH = get_faiss_path()
 
 
 class DBService:
@@ -42,45 +55,31 @@ class DBService:
     FAISS 벡터 데이터베이스와 상호작용하며,
     목차 기반 검색을 핵심 전략으로 사용하는 서비스 클래스.
     """
-    def __init__(self, faiss_path=FAISS_PATH, embedding_type="ollama"):
+    def __init__(self, faiss_path=None, embedding_type="google"):
         logging.info("DEBUG: DBService 인스턴스 초기화 시작...")
 
+        # 배포 환경에서는 FAISS 경로 동적 설정
+        if faiss_path is None:
+            faiss_path = get_faiss_path()
+
         try:
-            if embedding_type == "ollama":
-                # Ollama 임베딩 모델 사용 (nomic-embed-text)
-                logging.info("Ollama nomic-embed-text 임베딩 모델을 로딩합니다...")
-                self.embeddings = get_ollama_embeddings()
-                logging.info("DEBUG: Ollama 임베딩 모델 로딩 성공.")
-            elif embedding_type == "bge":
-                # BGE-M3 로컬 임베딩 모델 사용
-                logging.info("로컬 BGE-M3 임베딩 모델을 로딩합니다...")
-                self.embeddings = get_local_embeddings()
-                logging.info("DEBUG: BGE-M3 로컬 임베딩 모델 로딩 성공.")
-            else:
-                # Google 임베딩 모델 사용 (기존 방식)
+            # Streamlit Cloud 배포 시에는 Google 임베딩만 사용
+            if embedding_type == "google":
                 self.embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
                 logging.info("DEBUG: Google 최신 임베딩 모델 로딩 성공.")
+            else:
+                # 로컬 개발 환경에서만 다른 임베딩 사용 가능
+                logging.warning(f"'{embedding_type}' 임베딩은 배포 환경에서 지원되지 않습니다. Google 임베딩으로 대체합니다.")
+                self.embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
+                logging.info("DEBUG: Google 임베딩으로 대체 완료.")
         except Exception as e:
             logging.error(f"!!! 임베딩 모델 초기화 실패: {e}")
-            if embedding_type == "ollama":
-                raise ConnectionError(
-                    f"Ollama 임베딩 모델 초기화에 실패했습니다.\n"
-                    f"Ollama 서버가 실행 중인지, nomic-embed-text 모델이 설치되었는지 확인하세요.\n"
-                    f"상세 오류: {e}"
-                )
-            elif embedding_type == "bge":
-                raise ConnectionError(
-                    f"BGE-M3 로컬 임베딩 모델 초기화에 실패했습니다.\n"
-                    f"다음 패키지가 설치되었는지 확인하세요: sentence-transformers, FlagEmbedding\n"
-                    f"상세 오류: {e}"
-                )
-            else:
-                raise ConnectionError(
-                    f"Google Embedding 모델 초기화에 실패했습니다. 다음을 확인하세요:\n"
-                    f"- 'GOOGLE_API_KEY' 환경 변수가 .env 파일에 올바르게 설정되었는지.\n"
-                    f"- Google Cloud 프로젝트에서 'Generative Language API'가 활성화되었는지.\n"
-                    f"상세 오류: {e}"
-                )
+            raise ConnectionError(
+                f"Google Embedding 모델 초기화에 실패했습니다. 다음을 확인하세요:\n"
+                f"- 'GOOGLE_API_KEY' 환경 변수가 올바르게 설정되었는지.\n"
+                f"- Google Cloud 프로젝트에서 'Generative Language API'가 활성화되었는지.\n"
+                f"상세 오류: {e}"
+            )
 
         try:
             absolute_faiss_path = str(Path(faiss_path).resolve())
