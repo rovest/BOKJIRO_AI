@@ -10,3 +10,6 @@ sentence-transformers
 torch
 transformers
 FlagEmbedding
+thefuzz
+requests
+google-api-core
