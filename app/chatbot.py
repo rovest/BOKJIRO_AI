@@ -1,17 +1,22 @@
 # app/chatbot.py
 import json
 import re
+import logging
+from typing import Tuple, Optional
 from thefuzz import fuzz
 from .llm_service import get_llm
 from .db_service import DBService
 from langchain.prompts import PromptTemplate
 from langchain_core.output_parsers import JsonOutputParser, StrOutputParser
 from langchain_core.documents import Document
+from langchain.schema import OutputParserException
+from requests.exceptions import RequestException, Timeout
+from google.api_core.exceptions import GoogleAPIError
 
 class WelfareChatbot:
-    def __init__(self, user_id, llm_choice="gemini"):
+    def __init__(self, user_id, llm_choice="exaone", embedding_type="ollama"):
         self.user_id = user_id
-        self.db_service = DBService()
+        self.db_service = DBService(embedding_type=embedding_type)
         self.llm = get_llm(llm_choice)
         self.schema_context_str = None
         self.service_names_list = []
@@ -35,11 +40,24 @@ class WelfareChatbot:
 
         try:
             return self._get_intelligent_response(user_message, chat_history)
+        except GoogleAPIError as e:
+            logging.error(f"Google API 오류 발생: {e}")
+            return "Google AI 서비스에 일시적인 문제가 발생했습니다. 잠시 후 다시 시도해주세요.", "NORMAL"
+        except (RequestException, Timeout) as e:
+            logging.error(f"네트워크 연결 오류: {e}")
+            return "네트워크 연결에 문제가 있습니다. 인터넷 연결을 확인하고 다시 시도해주세요.", "NORMAL"
+        except OutputParserException as e:
+            logging.error(f"AI 응답 파싱 오류: {e}")
+            return "AI 응답을 처리하는 중 문제가 발생했습니다. 질문을 다시 입력해주세요.", "NORMAL"
+        except FileNotFoundError as e:
+            logging.error(f"데이터베이스 파일 누락: {e}")
+            return "복지 정보 데이터베이스에 접근할 수 없습니다. 관리자에게 문의해주세요.", "NORMAL"
+        except ValueError as e:
+            logging.error(f"입력 값 오류: {e}")
+            return "입력하신 내용을 이해할 수 없습니다. 다른 방식으로 질문해주세요.", "NORMAL"
         except Exception as e:
-            import traceback
-            print(f"!!!!!!!!!!!! 최상위 오류 발생 in chat processing: {e} !!!!!!!!!!!!")
-            traceback.print_exc()
-            return "죄송합니다, 답변을 생성하는 중 예상치 못한 오류가 발생했습니다.", "NORMAL"
+            logging.error(f"예상치 못한 오류 발생: {e}", exc_info=True)
+            return "죄송합니다, 답변을 생성하는 중 예상치 못한 오류가 발생했습니다. 잠시 후 다시 시도해주세요.", "NORMAL"
 
     def _format_chat_history(self, messages):
         """세션의 메시지 기록을 LLM 컨텍스트에 넣을 문자열로 변환합니다."""
@@ -220,10 +238,16 @@ class WelfareChatbot:
             analysis_result = analysis_chain.invoke({
                 "question": user_message, "schema_context": self.schema_context_str, "chat_history": chat_history
             })
-            print(f"DEBUG: LLM 분석 결과 (검색 설계도):\n{json.dumps(analysis_result, ensure_ascii=False, indent=2)}")
+            logging.debug(f"LLM 분석 결과 (검색 설계도):\n{json.dumps(analysis_result, ensure_ascii=False, indent=2)}")
             return analysis_result
+        except GoogleAPIError as e:
+            logging.error(f"Google API 호출 실패 - 질의어 분석: {e}")
+            return {"intent": "API 오류", "semantic_keywords": [user_message], "metadata_filters": {}}
+        except OutputParserException as e:
+            logging.error(f"LLM 응답 파싱 실패 - 질의어 분석: {e}")
+            return {"intent": "파싱 오류", "semantic_keywords": [user_message], "metadata_filters": {}}
         except Exception as e:
-            print(f"!!! LLM 질의어 분석 실패: {e}")
+            logging.error(f"질의어 분석 중 예상치 못한 오류: {e}")
             return {"intent": "분석 실패", "semantic_keywords": [user_message], "metadata_filters": {}}
 
     

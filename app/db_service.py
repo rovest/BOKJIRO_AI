@@ -14,21 +14,27 @@ load_dotenv()
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
+from .local_embeddings import get_local_embeddings  # BGE-M3 활성화
+from .ollama_embeddings import get_ollama_embeddings
 
-import asyncio # asyncio 임포트 추가
 
 # --- 상수 정의 ---
 try:
     CURRENT_DIR = Path(__file__).parent
     BASE_DIR = CURRENT_DIR.parent
     DB_DIR = BASE_DIR / "db"
-    FAISS_PATH = str(DB_DIR / "faiss_index")
-    if not (DB_DIR / "faiss_index").exists():
-        raise FileNotFoundError("FAISS index directory not found at primary path.")
+    # BGE-M3 전용 인덱스 경로
+    FAISS_PATH = str(DB_DIR / "faiss_index_bge")
+    if not (DB_DIR / "faiss_index_bge").exists():
+        # 기존 Ollama 인덱스가 있으면 사용
+        if (DB_DIR / "faiss_index").exists():
+            FAISS_PATH = str(DB_DIR / "faiss_index")
+        else:
+            raise FileNotFoundError("FAISS index directory not found at any path.")
 except NameError:
     BASE_DIR = Path.cwd()
     DB_DIR = BASE_DIR / "db"
-    FAISS_PATH = str(DB_DIR / "faiss_index")
+    FAISS_PATH = str(DB_DIR / "faiss_index_bge")
 
 
 class DBService:
@@ -36,37 +42,53 @@ class DBService:
     FAISS 벡터 데이터베이스와 상호작용하며,
     목차 기반 검색을 핵심 전략으로 사용하는 서비스 클래스.
     """
-    def __init__(self, faiss_path=FAISS_PATH):
+    def __init__(self, faiss_path=FAISS_PATH, embedding_type="ollama"):
         logging.info("DEBUG: DBService 인스턴스 초기화 시작...")
-        
-        try:
-            # === 핵심 변경: GoogleGenerativeAIEmbeddings 초기화를 asyncio.run으로 감쌉니다 ===
-            # 이 클래스 자체의 __init__이 비동기 작업을 트리거하여 이벤트 루프를 요구합니다.
-            async def _init_embeddings_async():
-                return GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
 
-            self.embeddings = asyncio.run(_init_embeddings_async()) # <<<<<<<<<<<<<<< 이 부분이 수정되었습니다.
-            logging.info("DEBUG: Google 최신 임베딩 모델 로딩 성공.")
+        try:
+            if embedding_type == "ollama":
+                # Ollama 임베딩 모델 사용 (nomic-embed-text)
+                logging.info("Ollama nomic-embed-text 임베딩 모델을 로딩합니다...")
+                self.embeddings = get_ollama_embeddings()
+                logging.info("DEBUG: Ollama 임베딩 모델 로딩 성공.")
+            elif embedding_type == "bge":
+                # BGE-M3 로컬 임베딩 모델 사용
+                logging.info("로컬 BGE-M3 임베딩 모델을 로딩합니다...")
+                self.embeddings = get_local_embeddings()
+                logging.info("DEBUG: BGE-M3 로컬 임베딩 모델 로딩 성공.")
+            else:
+                # Google 임베딩 모델 사용 (기존 방식)
+                self.embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
+                logging.info("DEBUG: Google 최신 임베딩 모델 로딩 성공.")
         except Exception as e:
-            logging.error(f"!!! Google Embedding 모델 초기화 실패: {e}")
-            raise ConnectionError(
-                f"Google Embedding 모델 초기화에 실패했습니다. 다음을 확인하세요:\n"
-                f"- 'GOOGLE_API_KEY' 환경 변수가 .env 파일에 올바르게 설정되었는지.\n"
-                f"- Google Cloud 프로젝트에서 'Generative Language API'가 활성화되었는지.\n"
-                f"상세 오류: {e}"
-            )
+            logging.error(f"!!! 임베딩 모델 초기화 실패: {e}")
+            if embedding_type == "ollama":
+                raise ConnectionError(
+                    f"Ollama 임베딩 모델 초기화에 실패했습니다.\n"
+                    f"Ollama 서버가 실행 중인지, nomic-embed-text 모델이 설치되었는지 확인하세요.\n"
+                    f"상세 오류: {e}"
+                )
+            elif embedding_type == "bge":
+                raise ConnectionError(
+                    f"BGE-M3 로컬 임베딩 모델 초기화에 실패했습니다.\n"
+                    f"다음 패키지가 설치되었는지 확인하세요: sentence-transformers, FlagEmbedding\n"
+                    f"상세 오류: {e}"
+                )
+            else:
+                raise ConnectionError(
+                    f"Google Embedding 모델 초기화에 실패했습니다. 다음을 확인하세요:\n"
+                    f"- 'GOOGLE_API_KEY' 환경 변수가 .env 파일에 올바르게 설정되었는지.\n"
+                    f"- Google Cloud 프로젝트에서 'Generative Language API'가 활성화되었는지.\n"
+                    f"상세 오류: {e}"
+                )
 
         try:
             absolute_faiss_path = str(Path(faiss_path).resolve())
             
-            # FAISS.load_local은 동기 함수이지만, 내부적으로 embeddings 객체를 사용하며
-            # 이 객체가 여전히 비동기적 요구사항을 가질 수 있어 안전하게 asyncio.run으로 감쌉니다.
-            async def _load_faiss_async():
-                return FAISS.load_local(
-                    absolute_faiss_path, self.embeddings, allow_dangerous_deserialization=True
-                )
-            
-            self.vector_db = asyncio.run(_load_faiss_async())
+            # FAISS 벡터 DB 로드 (동기 방식으로 안정성 개선)
+            self.vector_db = FAISS.load_local(
+                absolute_faiss_path, self.embeddings, allow_dangerous_deserialization=True
+            )
             
             self.all_docs = [self.vector_db.docstore.search(doc_id) 
                              for doc_id in self.vector_db.index_to_docstore_id.values() 
@@ -77,11 +99,8 @@ class DBService:
                 doc for doc in self.all_docs 
                 if doc.metadata.get('중분류') == '목차' and doc.metadata.get('항목') == '세부목차'
             ]
-            # FAISS.from_documents도 embeddings를 사용하므로 안전하게 asyncio.run으로 감쌉니다.
-            async def _create_toc_db_async():
-                return FAISS.from_documents(self.toc_docs, self.embeddings)
-            
-            self.toc_db = asyncio.run(_create_toc_db_async()) if self.toc_docs else None # <<<<<<<<<<<<< 이 부분도 수정
+            # 목차 전용 DB 생성 (동기 방식으로 안정성 개선)
+            self.toc_db = FAISS.from_documents(self.toc_docs, self.embeddings) if self.toc_docs else None
             logging.info(f"DEBUG: FAISS 벡터 DB 로드 성공. 전체 {len(self.all_docs)}개 문서, 목차 {len(self.toc_docs)}개 항목.")
             
         except Exception as e:
@@ -163,17 +182,11 @@ class DBService:
 
         search_query = " ".join(keywords)
         
-        # FAISS.from_documents는 임베딩 모델을 사용하므로 asyncio.run으로 감쌉니다.
-        async def _create_temp_db_async():
-            return FAISS.from_documents(primary_docs, self.embeddings)
+        # 임시 DB 생성 (동기 방식으로 안정성 개선)
+        temp_db = FAISS.from_documents(primary_docs, self.embeddings)
         
-        temp_db = asyncio.run(_create_temp_db_async()) # <<<<<<<<<<<<<<< 이 부분도 수정되었습니다.
-        
-        # similarity_search도 비동기적일 수 있으므로, 명시적으로 비동기 함수로 감싸고 실행합니다.
-        async def _run_similarity_search_async():
-            return temp_db.similarity_search(query=search_query, k=k)
-        
-        final_docs = asyncio.run(_run_similarity_search_async())
+        # 유사도 검색 (동기 방식으로 안정성 개선)
+        final_docs = temp_db.similarity_search(query=search_query, k=k)
 
 
         logging.debug("\n" + "="*50)

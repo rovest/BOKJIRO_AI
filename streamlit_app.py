@@ -1,6 +1,34 @@
 import streamlit as st
 import time
+import sys
+import logging
 from app.chatbot import WelfareChatbot
+from app.config import get_config, setup_logging
+from app.health_check import check_system_health, log_health_status
+
+# Initialize configuration and logging
+try:
+    config = get_config()
+    setup_logging(config)
+
+    # Perform system health check
+    health_status = check_system_health()
+    log_health_status(health_status)
+
+    if health_status["status"] != "healthy":
+        st.error("❌ 시스템 상태 확인 실패")
+        for error in health_status["errors"]:
+            st.warning(f"⚠️ {error}")
+        st.info("📝 README.md를 참조하여 시스템을 올바르게 설정해주세요.")
+        st.stop()
+
+except ValueError as e:
+    st.error(f"❌ 설정 오류: {e}")
+    st.info("📝 .env 파일에서 GOOGLE_API_KEY를 올바르게 설정해주세요.")
+    st.stop()
+except Exception as e:
+    st.error(f"❌ 시스템 초기화 오류: {e}")
+    st.stop()
 
 # 1. st.set_page_config()는 반드시 한 번만, 가장 먼저 호출되어야 합니다.
 # --- 페이지 기본 설정 ---
@@ -74,8 +102,8 @@ st.markdown(
 @st.cache_resource
 def load_chatbot_instance(llm_name):
     """선택된 LLM에 맞춰 챗봇 인스턴스를 로드합니다."""
-    print(f"DEBUG: '{llm_name}' 모델로 챗봇 인스턴스를 새로 로드합니다.")
-    return WelfareChatbot(user_id="streamlit_user", llm_choice=llm_name)
+    logging.info(f"'{llm_name}' 모델로 챗봇 인스턴스를 새로 로드합니다.")
+    return WelfareChatbot(user_id="streamlit_user", llm_choice=llm_name, embedding_type="bge")
 
 # --- 헬퍼 함수 ---
 def get_initial_message():
